@@ -1,0 +1,27 @@
+{
+  "name": "whoami",
+  "version": "1.0.0",
+  "description": "Mini Node whoami service for deployment testing",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --check index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RomainLanz/whoami.git"
+  },
+  "keywords": [
+    "whoami",
+    "deploy",
+    "traefik"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/RomainLanz/whoami/issues"
+  },
+  "homepage": "https://github.com/RomainLanz/whoami#readme"
+}

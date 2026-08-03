@@ -1,69 +1,83 @@
 const http = require("http");
-const os = require("os");
+const { Client } = require("pg");
 
-const port = Number(process.env.PORT || 3000);
+function parseNonNegativeInteger(name, fallback) {
+  const value = process.env[name] ?? fallback;
+
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${name} must be a non-negative safe integer`);
+  }
+
+  return parsed;
+}
+
+function parseHealthStatus() {
+  const status = parseNonNegativeInteger("HEALTH_STATUS", "200");
+
+  if (status < 200 || status > 599 || [204, 205, 304].includes(status)) {
+    throw new Error("HEALTH_STATUS must be a response status from 200 to 599 with a body");
+  }
+
+  return status;
+}
+
+const port = parseNonNegativeInteger("PORT", "8080");
+
+if (port < 1 || port > 65535) {
+  throw new Error("PORT must be between 1 and 65535");
+}
+
 const host = process.env.HOST || "0.0.0.0";
-const serviceName = process.env.SERVICE_NAME || "whoami";
-const instanceId =
-  process.env.INSTANCE_ID ||
-  process.env.HOSTNAME ||
-  `${os.hostname()}:${process.pid}`;
-const startedAt = new Date().toISOString();
+const fixtureId = process.env.FIXTURE_ID || "whoami";
+const releaseId = process.env.RELEASE_ID || "unknown";
+const healthStatus = parseHealthStatus();
+const readyDelayMs = parseNonNegativeInteger("READY_DELAY_MS", "0");
+const readyAt = process.hrtime.bigint() + BigInt(readyDelayMs) * 1_000_000n;
+const databaseUrl = process.env.DATABASE_URL;
+const allowedEnvironmentNames = [...new Set(
+  (process.env.ALLOW_ENV || "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean),
+)].sort();
 
-function getNetworkAddresses() {
-  const interfaces = os.networkInterfaces();
-  const addresses = [];
+function isSensitiveEnvironmentName(name) {
+  return /DATABASE_URL|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY|API_KEY|ACCESS_KEY|AUTHORIZATION|COOKIE/i.test(
+    name,
+  );
+}
 
-  for (const [name, entries] of Object.entries(interfaces)) {
-    for (const entry of entries || []) {
-      if (entry.internal) {
-        continue;
-      }
+function getAllowedEnvironment() {
+  const environment = {};
 
-      addresses.push(`${name}:${entry.family}:${entry.address}`);
+  for (const name of allowedEnvironmentNames) {
+    if (!isSensitiveEnvironmentName(name) && process.env[name] !== undefined) {
+      environment[name] = process.env[name];
     }
   }
 
-  return addresses;
+  return environment;
 }
 
-function getRequestIp(req) {
-  const forwardedFor = req.headers["x-forwarded-for"];
-
-  if (typeof forwardedFor === "string" && forwardedFor.length > 0) {
-    return forwardedFor.split(",")[0].trim();
-  }
-
-  return req.socket.remoteAddress || "unknown";
+function getPath(req) {
+  return new URL(req.url || "/", "http://localhost").pathname;
 }
 
-function buildPayload(req) {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-
+function buildPayload(req, path) {
   return {
-    service: serviceName,
-    instance: instanceId,
-    hostname: os.hostname(),
-    pid: process.pid,
-    version: process.env.APP_VERSION || process.env.npm_package_version || "unknown",
-    commit: process.env.COMMIT_SHA || "unknown",
-    startedAt,
-    now: new Date().toISOString(),
+    service: "whoami",
+    fixture: fixtureId,
+    release: releaseId,
+    environment: getAllowedEnvironment(),
     request: {
-      method: req.method,
-      path: url.pathname,
-      query: Object.fromEntries(url.searchParams.entries()),
-      host: req.headers.host || "unknown",
-      protocol: req.headers["x-forwarded-proto"] || "http",
-      remoteAddress: req.socket.remoteAddress || "unknown",
-      clientIp: getRequestIp(req),
-      forwardedFor: req.headers["x-forwarded-for"] || null,
-      forwardedHost: req.headers["x-forwarded-host"] || null,
-      userAgent: req.headers["user-agent"] || null,
-      headers: req.headers,
-    },
-    network: {
-      addresses: getNetworkAddresses(),
+      method: req.method || "UNKNOWN",
+      path,
     },
   };
 }
@@ -71,72 +85,136 @@ function buildPayload(req) {
 function toPlainText(payload) {
   const lines = [
     `Name: ${payload.service}`,
-    `Instance: ${payload.instance}`,
-    `Hostname: ${payload.hostname}`,
-    `PID: ${payload.pid}`,
-    `Version: ${payload.version}`,
-    `Commit: ${payload.commit}`,
-    `Started-At: ${payload.startedAt}`,
-    `Now: ${payload.now}`,
-    `IP: ${payload.request.remoteAddress}`,
-    `Client-IP: ${payload.request.clientIp}`,
-    `Host: ${payload.request.host}`,
+    `Fixture: ${JSON.stringify(payload.fixture)}`,
+    `Release: ${JSON.stringify(payload.release)}`,
     `Method: ${payload.request.method}`,
     `Path: ${payload.request.path}`,
-    `Protocol: ${payload.request.protocol}`,
   ];
 
-  if (payload.request.forwardedFor) {
-    lines.push(`X-Forwarded-For: ${payload.request.forwardedFor}`);
-  }
+  if (Object.keys(payload.environment).length > 0) {
+    lines.push("Environment:");
 
-  if (payload.request.forwardedHost) {
-    lines.push(`X-Forwarded-Host: ${payload.request.forwardedHost}`);
-  }
-
-  lines.push("Headers:");
-
-  for (const [key, value] of Object.entries(payload.request.headers)) {
-    lines.push(`  ${key}: ${value}`);
-  }
-
-  if (payload.network.addresses.length > 0) {
-    lines.push("Network:");
-
-    for (const address of payload.network.addresses) {
-      lines.push(`  ${address}`);
+    for (const [name, value] of Object.entries(payload.environment)) {
+      lines.push(`  ${name}: ${JSON.stringify(value)}`);
     }
   }
 
   return `${lines.join("\n")}\n`;
 }
 
-const server = http.createServer((req, res) => {
-  const payload = buildPayload(req);
+function sendText(res, status, body) {
+  res.writeHead(status, { "content-type": "text/plain" });
+  res.end(body);
+}
+
+function sendJson(res, status, payload) {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(payload));
+}
+
+async function checkDatabase(res) {
+  if (!databaseUrl) {
+    sendText(res, 503, "database unavailable\n");
+    return;
+  }
+
+  const timeoutMs = 3000;
+  const deadline = process.hrtime.bigint() + BigInt(timeoutMs) * 1_000_000n;
+  let client;
+
+  try {
+    client = new Client({
+      connectionString: databaseUrl,
+      connectionTimeoutMillis: timeoutMs,
+      statement_timeout: timeoutMs,
+    });
+    client.on("error", () => {});
+
+    await client.connect();
+    const remainingMs = Number(
+      (deadline - process.hrtime.bigint()) / 1_000_000n,
+    );
+
+    if (remainingMs <= 0) {
+      throw new Error("database timeout");
+    }
+
+    const result = await client.query({
+      text: "SELECT 1",
+      query_timeout: remainingMs,
+    });
+    const values = result.rows.length === 1 ? Object.values(result.rows[0]) : [];
+
+    if (values.length !== 1 || values[0] !== 1) {
+      throw new Error("unexpected database result");
+    }
+
+    sendText(res, 200, "1\n");
+  } catch {
+    sendText(res, 503, "database unavailable\n");
+  } finally {
+    if (client) {
+      try {
+        await client.end();
+      } catch {
+        // The response remains intentionally independent of driver diagnostics.
+      }
+    }
+  }
+}
+
+const server = http.createServer(async (req, res) => {
+  let path;
+
+  try {
+    path = getPath(req);
+  } catch {
+    sendText(res, 400, "bad request\n");
+    return;
+  }
+
+  if (path === "/healthz") {
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (path === "/ready") {
+    const ready = readyDelayMs === 0 || process.hrtime.bigint() >= readyAt;
+    sendText(res, ready ? 200 : 503, ready ? "ready\n" : "not ready\n");
+    return;
+  }
+
+  if (path === "/health") {
+    sendJson(res, healthStatus, { status: healthStatus });
+    return;
+  }
+
+  if (path === "/release") {
+    sendJson(res, 200, { release: releaseId });
+    return;
+  }
+
+  if (path === "/database") {
+    await checkDatabase(res);
+    return;
+  }
+
+  const payload = buildPayload(req, path);
   const accept = req.headers.accept || "";
 
-  if (payload.request.path === "/healthz") {
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true, service: serviceName, instance: instanceId }));
+  if (path === "/json" || accept.includes("application/json")) {
+    sendJson(res, 200, payload);
     return;
   }
 
-  if (payload.request.path === "/json" || accept.includes("application/json")) {
-    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(payload, null, 2));
-    return;
-  }
-
-  res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-  res.end(toPlainText(payload));
+  sendText(res, 200, toPlainText(payload));
 });
 
 server.listen(port, host, () => {
   console.log(
     JSON.stringify({
       message: "whoami listening",
-      service: serviceName,
-      instance: instanceId,
+      fixture: fixtureId,
       host,
       port,
     }),

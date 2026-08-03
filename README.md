@@ -1,32 +1,39 @@
 # whoami
 
-Small Node.js service inspired by `traefik/whoami`, built to validate deployments quickly.
+Public source fixture for Tenkai's **Railpack/buildpack** path. This repository
+intentionally has no `Dockerfile`: `package.json`, its lockfile, and `npm start`
+are the complete build contract. The real proof is Tenkai's real-runtime harness,
+which clones this repository and asks Railpack to detect and build it.
 
-## Usage
+The HTTP implementation is kept byte-for-byte identical across the four
+`whoami*` fixtures. Build-specific files and the explicit `FIXTURE_ID` may differ.
+
+## Run
 
 ```bash
+npm ci
 npm start
 ```
 
-Useful environment variables:
+The service listens on `HOST=0.0.0.0` and `PORT=8080` by default.
 
-- `PORT`: listening port, defaults to `3000`
-- `HOST`: listening interface, defaults to `0.0.0.0`
-- `SERVICE_NAME`: name shown in the response
-- `INSTANCE_ID`: explicit instance identifier
-- `APP_VERSION`: version shown in the response
-- `COMMIT_SHA`: commit SHA or tag shown in the response
+## Configuration and endpoints
 
-## Endpoints
+| Variable | Default | Endpoint |
+| --- | --- | --- |
+| `READY_DELAY_MS` | `0` | `GET /ready` returns `503` until the monotonic delay expires, then `200` |
+| `HEALTH_STATUS` | `200` | `GET /health` returns `{"status":<status>}` with that status |
+| `RELEASE_ID` | `unknown` | `GET /release` returns `{"release":"<value>"}` |
+| `DATABASE_URL` | absent | `GET /database` runs `SELECT 1`, or returns a stable `503` |
+| `ALLOW_ENV` | empty | Comma-separated environment names exposed by `/` and `/json` |
 
-- `/`: plain text response similar to `whoami`
-- `/json`: same payload as JSON
-- `/healthz`: minimal health endpoint
+`HEALTH_STATUS` accepts body-bearing response statuses from 200 through 599
+(excluding 204, 205, and 304). Invalid readiness or health configuration aborts
+startup. Sensitive variables are never exposed, even when named in `ALLOW_ENV`.
+Database failures never include PostgreSQL diagnostics or credentials.
 
-## Examples
+Historical endpoints remain available: `/` (plain text), `/json` (JSON), and
+`/healthz` (minimal health check).
 
-```bash
-curl http://localhost:3000/
-curl http://localhost:3000/json
-curl -H "X-Forwarded-For: 203.0.113.10" http://localhost:3000/
-```
+No OCI image is published from this repository. In particular, a workflow here
+would not prove Tenkai's Railpack source-build path.

@@ -1,4 +1,5 @@
 const http = require("http");
+const os = require("os");
 const { Client } = require("pg");
 
 function parseNonNegativeInteger(name, fallback) {
@@ -47,9 +48,9 @@ const allowedEnvironmentNames = [...new Set(
     .filter(Boolean),
 )].sort();
 
-function isSensitiveEnvironmentName(name) {
+function isSensitiveName(name) {
   return /DATABASE_URL|PASSWORD|PASSWD|SECRET|TOKEN|CREDENTIAL|PRIVATE_KEY|API_KEY|ACCESS_KEY|AUTHORIZATION|COOKIE/i.test(
-    name,
+    name.replaceAll("-", "_"),
   );
 }
 
@@ -57,7 +58,7 @@ function getAllowedEnvironment() {
   const environment = {};
 
   for (const name of allowedEnvironmentNames) {
-    if (!isSensitiveEnvironmentName(name) && process.env[name] !== undefined) {
+    if (!isSensitiveName(name) && process.env[name] !== undefined) {
       environment[name] = process.env[name];
     }
   }
@@ -75,9 +76,34 @@ function buildPayload(req, path) {
     fixture: fixtureId,
     release: releaseId,
     environment: getAllowedEnvironment(),
+    instance: {
+      hostname: os.hostname(),
+      addresses: Object.values(os.networkInterfaces())
+        .flat()
+        .map(({ address, family, internal }) => ({ address, family, internal })),
+    },
+    runtime: {
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      pid: process.pid,
+      uptimeSeconds: process.uptime(),
+    },
     request: {
       method: req.method || "UNKNOWN",
       path,
+      url: req.url,
+      httpVersion: req.httpVersion,
+      headers: Object.fromEntries(
+        Object.entries(req.headers).map(([name, value]) => [
+          name,
+          isSensitiveName(name) ? "[REDACTED]" : value,
+        ]),
+      ),
+      remoteAddress: req.socket.remoteAddress,
+      remotePort: req.socket.remotePort,
+      localAddress: req.socket.localAddress,
+      localPort: req.socket.localPort,
     },
   };
 }
@@ -89,7 +115,27 @@ function toPlainText(payload) {
     `Release: ${JSON.stringify(payload.release)}`,
     `Method: ${payload.request.method}`,
     `Path: ${payload.request.path}`,
+    `Hostname: ${payload.instance.hostname}`,
+    ...payload.instance.addresses.map(
+      ({ address, family, internal }) =>
+        `IP: ${address} (${family}${internal ? ", loopback" : ""})`,
+    ),
+    `Node: ${payload.runtime.node}`,
+    `Platform: ${payload.runtime.platform}/${payload.runtime.arch}`,
+    `PID: ${payload.runtime.pid}`,
+    `Uptime: ${payload.runtime.uptimeSeconds.toFixed(3)}s`,
+    `URL: ${JSON.stringify(payload.request.url)}`,
+    `HTTP: ${payload.request.httpVersion}`,
+    `Remote address: ${payload.request.remoteAddress}`,
+    `Remote port: ${payload.request.remotePort}`,
+    `Local address: ${payload.request.localAddress}`,
+    `Local port: ${payload.request.localPort}`,
+    "Headers:",
   ];
+
+  for (const [name, value] of Object.entries(payload.request.headers)) {
+    lines.push(`  ${name}: ${JSON.stringify(value)}`);
+  }
 
   if (Object.keys(payload.environment).length > 0) {
     lines.push("Environment:");
